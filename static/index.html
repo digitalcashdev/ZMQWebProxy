@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GoBoilerplate Explorer - Digital Cash</title>
+    <link rel="stylesheet" href="./mvp.css" />
+    <style>
+      nav {
+        margin-bottom: 0.3rem;
+      }
+      header {
+        padding-top: 0;
+        padding-bottom: 0.3rem;
+      }
+      header nav img {
+        margin: 0;
+      }
+      main {
+        padding-top: 0;
+      }
+      form {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      hr,
+      footer hr {
+        margin-top: 1.2rem;
+        margin-bottom: 1.2rem;
+      }
+      footer {
+        padding: 1rem; 1rem;
+      }
+      code {
+        word-break: break-all;
+      }
+    </style>
+  </head>
+
+  <body hidden="hidden">
+    <header>
+      <nav>
+        <a href="./"
+          ><img
+            alt="GoBoilerplate - Digital Cash . dev"
+            src="https://github.com/user-attachments/assets/2e37b64c-9994-4029-8bfd-9101dc27906c"
+            height="96"
+        /></a>
+        <h1>GoBoilerplate Explorer</h1>
+        <ul>
+          <li data-network="testnet" hidden>
+            <a
+              href="http://faucet.test.dash.crowdnode.io/"
+              target="_blank"
+              title="CrowdNode Faucet"
+              >CN 💸</a
+            >
+          </li>
+          <li data-network="testnet" hidden>
+            <a
+              href="http://faucet.testnet.networks.dash.org/"
+              target="_blank"
+              title="Dash Core Group Faucet"
+              >DCG 💸</a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/DigitalCashDev/goboilerplate/issues"
+              target="_blank"
+              title="Git Issues"
+              >Bugs 🐛</a
+            >
+          </li>
+          <li>
+            <a
+              href="https://github.com/DigitalCashDev/goboilerplate"
+              target="_blank"
+              title="Git Source"
+              >Git 📦</a
+            >
+          </li>
+          <li>
+            <a
+              href="https://docs.dash.org/projects/core/en/stable/docs/goboilerplate"
+              target="_blank"
+              title="Dash Core Group Docs"
+              >DCG 📚</a
+            >
+          </li>
+        </ul>
+      </nav>
+    </header>
+    <main>
+      <section>
+        <form id="goboilerplate-form" onsubmit="App.$submitForm(event)">
+          <label data-network="testnet" hidden
+            >Network
+            <!-- <input type="text" data-id="network" disabled /> -->
+            <br />
+            <pre
+              style="margin: 0; padding: 0"
+            ><code data-id="network" disabled>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code></pre>
+          </label>
+          <label
+            >Endpoint <small>name (string)</small>
+            <input
+              type="text"
+              list="goboilerplate-endpoints"
+              name="goboilerplate-endpoint"
+              onkeyup="App.$updatePreview(event)"
+              onchange="App.$updatePreview(event)"
+              placeholder="ex: /api/goboilerplate/config"
+              required
+            />
+          </label>
+          <datalist id="goboilerplate-endpoints">
+            <option value="/api/goboilerplate/config"></option>
+            <option value="/api/goboilerplate/config/foo"></option>
+          </datalist>
+
+          <label for="http-request-preview"
+            >Preview <small>request (http get)</small>
+          </label>
+          <label style="display: inline-block"
+            ><input
+              type="radio"
+              name="http-request"
+              value="curl"
+              checked="checked"
+              onchange="App.$updatePreview(event)"
+            />
+            curl
+          </label>
+          <label style="display: inline-block"
+            ><input
+              type="radio"
+              name="http-request"
+              value="fetch"
+              onchange="App.$updatePreview(event)"
+            />
+            fetch
+          </label>
+          <textarea
+            data-id="http-request-preview"
+            style="width: 100%; box-sizing: border-box"
+            rows="9"
+            placeholder='ex: curl --fail-with-body http://localhost:3000/api/goboilerplate/config &#10;&#09;--user "$user:$pass" &#10;&#09;-H "Content-Type: application/json" &#10;&#09;--data-binary &apos;{&#10;&#09;&#09;"foo": "FOO" &#10;&#09;}&apos;'
+            disabled="disabled"
+          ></textarea>
+
+          <button type="submit">Try it!</button>
+          <br />
+          <small
+            >Share: <a href="/" data-id="share" target="_blank">/</a></small
+          >
+        </form>
+      </section>
+      <br />
+      <section>
+        <form>
+          <label
+            >Output
+            <pre><code data-id="output">N/A</code></pre>
+          </label>
+        </form>
+      </section>
+      <footer>
+        <hr />
+        <p>
+          © Dash Developers
+          <a href="https://digitalcash.dev" target="_blank">DigitalCash.Dev</a
+          ><br />
+        </p>
+      </footer>
+    </main>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "goboilerplate": "./app.js",
+          "goboilerplate/": "./"
+        }
+      }
+    </script>
+    <script type="module">
+      import App from "./app.js";
+      window.App = App;
+    </script>
+  </body>
+</html>
