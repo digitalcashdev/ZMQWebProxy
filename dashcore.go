@@ -1,13 +1,12 @@
-package main
+package zmqwebproxy
 
 import (
 	"bytes"
 
-	"github.com/DigitalCashDev/zmqproxy"
 	"github.com/dashpay/dashd-go/wire"
 )
 
-func parseTx(rawTx []byte) (*zmqproxy.Tx, error) {
+func parseTx(rawTx []byte) (*Tx, error) {
 	msgTx := &wire.MsgTx{}
 	r := bytes.NewReader(rawTx)
 	err := msgTx.Deserialize(r)
@@ -15,7 +14,7 @@ func parseTx(rawTx []byte) (*zmqproxy.Tx, error) {
 		return nil, err
 	}
 
-	tx, err := zmqproxy.MsgTxToTx(msgTx)
+	tx, err := MsgTxToTx(msgTx)
 	if err != nil {
 		return nil, err
 	}

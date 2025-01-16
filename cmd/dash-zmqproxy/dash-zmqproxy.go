@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/DigitalCashDev/zmqwebproxy"
+
 	"github.com/dashpay/dashd-go/btcutil/base58"
 	"github.com/go-zeromq/zmq4"
 )
@@ -66,16 +68,16 @@ func main() {
 			os.Exit(1)
 		}
 
-		s := NewChatServer(context.TODO(), dashCoreZMQEndpoint)
+		s := zmqwebproxy.NewChatServer(context.TODO(), dashCoreZMQEndpoint)
 		s.ConnectWithReconnect()
 		for {
 			msg := s.Recv()
-			sendToAll(msg.Event, msg.Raw)
+			zmqwebproxy.SendToAll(msg.Event, msg.Raw)
 		}
 	}()
 
 	mux := http.NewServeMux()
-	initRoutes(mux)
+	zmqwebproxy.InitRoutes(mux)
 
 	log.Printf("Server is running on http://localhost%s", port)
 	if err := http.ListenAndServe(port, nil); err != nil {

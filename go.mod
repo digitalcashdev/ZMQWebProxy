@@ -1,4 +1,4 @@
-module github.com/DigitalCashDev/zmqproxy
+module github.com/DigitalCashDev/zmqwebproxy
 
 go 1.23.1
 

@@ -1,4 +1,4 @@
-package main
+package zmqwebproxy
 
 import (
 	"encoding/hex"
@@ -118,7 +118,7 @@ func EndWithResult(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func sendToAll(event string, raw []byte) {
+func SendToAll(event string, raw []byte) {
 	room := getRoom(event)
 	if room == nil {
 		return // TODO log sanity fail error
@@ -199,7 +199,7 @@ func getRoom(name string) *ChatRoom {
 	return nil
 }
 
-func initRoutes(mux Muxer) {
+func InitRoutes(mux Muxer) {
 	for _, name := range KnownTopics {
 		room := &ChatRoom{
 			ClientsById:    sync.Map{},

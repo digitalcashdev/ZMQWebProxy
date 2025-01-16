@@ -1,4 +1,4 @@
-package zmqproxy
+package zmqwebproxy
 
 import (
 	"encoding/hex"
