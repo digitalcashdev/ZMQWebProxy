@@ -1,5 +1,6 @@
 package static
 
+// https://pkg.go.dev/embed
 import "embed"
 
 // wget https://andybrewer.github.io/mvp/mvp.css

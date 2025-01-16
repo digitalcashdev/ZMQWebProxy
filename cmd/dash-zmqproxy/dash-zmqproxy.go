@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -101,6 +102,9 @@ func main() {
 	}
 	overlayFS.LocalFS = http.Dir(overlayFS.WebRoot)
 	overlayFS.EmbedFS = http.FS(static.FS)
+	if !overlayFS.WebRootOnly {
+		showEmbeddedFiles()
+	}
 
 	f, err := overlayFS.ForceLocalOrEmbedOpen(configJSONPath)
 	if err != nil {
@@ -162,9 +166,29 @@ func main() {
 
 	log.Printf("Server is running on http://localhost%d", httpPort)
 	bindAddr := fmt.Sprintf(":%d", httpPort)
-	if err := http.ListenAndServe(bindAddr, nil); err != nil {
+	if err := http.ListenAndServe(bindAddr, mux); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func showEmbeddedFiles() {
+	fmt.Fprintf(os.Stderr, "Embedded files:\n")
+	_ = fs.WalkDir(static.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "    error: %s\n", err)
+			return err
+		}
+		if path == "." {
+			return nil
+		}
+		if d.Type().IsDir() {
+			return nil
+		}
+
+		fmt.Fprintf(os.Stderr, "    ./%s\n", path)
+		return nil
+	})
+	fmt.Fprintf(os.Stderr, "\n")
 }
 
 func peekOption(args, aliases []string) string {
