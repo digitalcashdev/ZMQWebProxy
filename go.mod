@@ -7,6 +7,7 @@ require (
 	github.com/dashpay/dashd-go/btcutil v1.3.0
 	github.com/go-zeromq/zmq4 v0.17.0
 	github.com/google/uuid v1.6.0
+	github.com/joho/godotenv v1.5.1
 )
 
 require (

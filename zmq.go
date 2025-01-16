@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-zeromq/zmq4"
@@ -12,6 +13,7 @@ import (
 
 type Subscriber struct {
 	ctx         context.Context
+	topics      []string
 	zmqEndpoint string
 	zsub        zmq4.Socket // misnomer, it's semantically the Subscription type
 	msgChan     chan Message
@@ -25,11 +27,12 @@ type Message struct {
 	// Frames  [][]byte
 }
 
-func NewChatServer(ctx context.Context, zmqEndpoint string) *Subscriber {
+func NewChatServer(ctx context.Context, zmqEndpoint string, config Config) *Subscriber {
 	zsub := zmq4.NewSub(ctx)
 	s := &Subscriber{
 		ctx:         ctx,
 		zmqEndpoint: zmqEndpoint,
+		topics:      config.Topics,
 		zsub:        zsub,
 		msgChan:     make(chan Message),
 		// done:        make(chan struct{}),
@@ -39,7 +42,7 @@ func NewChatServer(ctx context.Context, zmqEndpoint string) *Subscriber {
 
 func (s *Subscriber) Connect() error {
 	zsub := zmq4.NewSub(context.Background())
-	fmt.Printf("Connecting to %s...\n", s.zmqEndpoint)
+	fmt.Printf("DEBUG: (re)connecting to %s...\n", s.zmqEndpoint)
 	err := zsub.Dial(s.zmqEndpoint)
 	if err != nil {
 		return err
@@ -47,11 +50,13 @@ func (s *Subscriber) Connect() error {
 
 	// _ = sub.SetOption(zmq4.OptionSubscribe, "") // subscribe to all topics
 
-	topics := []string{
-		"doesntexist", // arbitrary strings won't error
-		"rawtx",       // documented as 'zmqpubdoesntexist'
-	}
+	topics := append(s.topics, "doesntexist") // arbitrary strings won't error
 	for _, topic := range topics {
+		topic = strings.TrimSpace(topic)
+		if len(topic) == 0 || strings.HasPrefix(topic, "#") || strings.HasPrefix(topic, "//") || strings.HasPrefix(topic, "/*") {
+			fmt.Printf("ignoring comment '%s'\n", topic)
+			continue
+		}
 		fmt.Printf("Subscribing to topic '%s'\n", topic)
 		if err := s.zsub.SetOption(zmq4.OptionSubscribe, topic); err != nil {
 			return err

@@ -8,43 +8,22 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 )
 
-var (
+// Server is the API Service
+type Server struct {
+	Config      Config
 	roomsByName sync.Map
 	clientsByID sync.Map
 	msgChan     chan *ChatMessage
-	KnownTopics = []string{
-		// https://docs.dash.org/en/stable/docs/core/api/zmq.html
-		"hashblock",
-		"hashchainlock",
-		"hashtx",
-		"hashtxlock",
-		"hashgovernancevote",
-		"hashgovernanceobject",
-		"hashinstantsenddoublespend",
-		"hashrecoveredsig",
-		"rpcblock", // TODO add if "rawblock" is present
-		"rawblock",
-		"rawchainlock",
-		"rawchainlocksig",
-		"rpctx", // TODO add if "rawtx" is present
-		"rawtx",
-		"rawtxlock",
-		"rawtxlocksig",
-		"rpcgovernancevote", // TODO add if "rawgovernancevote" is present
-		"rawgovernancevote",
-		"rpcgovernanceobject", // TODO add if "rawgovernanceobject" is present
-		"rawgovernanceobject",
-		"rawinstantsenddoublespend",
-		"rawrecoveredsig",
-		"sequence",
-	}
-	KnownTopicList = strings.Join(KnownTopics, ", ")
-)
+}
+
+// Config is configuration
+type Config struct {
+	Topics []string `json:"topics"`
+}
 
 // ChatRoom holds a map of clients subscribed to it.
 type ChatRoom struct {
@@ -82,26 +61,6 @@ type ResultResponse struct {
 	Result string `json:"error"`
 }
 
-func (c *ChatClient) Send(id string, event string, messages []string) {
-	if len(id) > 0 {
-		_, _ = fmt.Fprintf(c.w, "id: %s\n", id)
-	}
-
-	if len(event) > 0 {
-		_, _ = fmt.Fprintf(c.w, "event: %s\n", id)
-	}
-
-	for _, message := range messages {
-		if _, err := fmt.Fprintf(c.w, "data: %s\n", message); err != nil {
-			clientsByID.Delete(id) // don't try again
-			return
-		}
-	}
-
-	fmt.Fprintf(c.w, "\n")
-	c.rc.Flush()
-}
-
 func EndWithError(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
 	errorResponse := ErrorResponse{
@@ -118,8 +77,44 @@ func EndWithResult(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func SendToAll(event string, raw []byte) {
-	room := getRoom(event)
+func New(config Config) *Server {
+	s := &Server{
+		Config: config,
+	}
+
+	for _, name := range s.Config.Topics {
+		room := &ChatRoom{
+			ClientsById:    sync.Map{},
+			RecentMessages: []ChatMessage{},
+		}
+		s.roomsByName.Store(name, room)
+	}
+
+	return s
+}
+
+func (s *Server) Send(c *ChatClient, id string, event string, messages []string) {
+	if len(id) > 0 {
+		_, _ = fmt.Fprintf(c.w, "id: %s\n", id)
+	}
+
+	if len(event) > 0 {
+		_, _ = fmt.Fprintf(c.w, "event: %s\n", id)
+	}
+
+	for _, message := range messages {
+		if _, err := fmt.Fprintf(c.w, "data: %s\n", message); err != nil {
+			s.clientsByID.Delete(id) // don't try again
+			return
+		}
+	}
+
+	fmt.Fprintf(c.w, "\n")
+	c.rc.Flush()
+}
+
+func (s *Server) SendToAll(event string, raw []byte) {
+	room := s.getRoom(event)
 	if room == nil {
 		return // TODO log sanity fail error
 	}
@@ -130,7 +125,7 @@ func SendToAll(event string, raw []byte) {
 		// TODO
 	case "rawtx":
 		var hasAny bool
-		room2 := getRoom(event)
+		room2 := s.getRoom(event)
 		room2.ClientsById.Range(func(k any, v any) bool {
 			hasAny = true
 			return false
@@ -142,7 +137,7 @@ func SendToAll(event string, raw []byte) {
 			} else {
 				// txJSON, _ = json.MarshalIndent(tx, "", "  ")
 				txJSON, _ := json.Marshal(tx)
-				defer sendToAllJSON("rpctx", txJSON)
+				defer s.sendToAllJSON("rpctx", txJSON)
 			}
 		}
 	case "rpcgovernancevote":
@@ -160,13 +155,13 @@ func SendToAll(event string, raw []byte) {
 		// clientID := k.(string)
 		client := v.(*ChatClient)
 		msgID := ""
-		client.Send(msgID, event, msgs)
+		s.Send(client, msgID, event, msgs)
 		return true
 	})
 }
 
-func sendToAllJSON(event string, msg []byte) {
-	room := getRoom(event)
+func (s *Server) sendToAllJSON(event string, msg []byte) {
+	room := s.getRoom(event)
 	if room == nil {
 		return // TODO log error
 	}
@@ -178,57 +173,28 @@ func sendToAllJSON(event string, msg []byte) {
 		// clientID := k.(string)
 		client := v.(*ChatClient)
 		msgID := ""
-		client.Send(msgID, event, msgs)
+		s.Send(client, msgID, event, msgs)
 		return true
 	})
 }
 
-func getClient(name string) *ChatClient {
-	if val, ok := clientsByID.Load(name); ok {
+func (s *Server) getClient(name string) *ChatClient {
+	if val, ok := s.clientsByID.Load(name); ok {
 		client, _ := val.(*ChatClient) // cannot fail, we exclusively control the map
 		return client
 	}
 	return nil
 }
 
-func getRoom(name string) *ChatRoom {
-	if val, ok := roomsByName.Load(name); ok {
+func (s *Server) getRoom(name string) *ChatRoom {
+	if val, ok := s.roomsByName.Load(name); ok {
 		room, _ := val.(*ChatRoom) // cannot fail, we exclusively control the map
 		return room
 	}
 	return nil
 }
 
-func InitRoutes(mux Muxer) {
-	for _, name := range KnownTopics {
-		room := &ChatRoom{
-			ClientsById:    sync.Map{},
-			RecentMessages: []ChatMessage{},
-		}
-		roomsByName.Store(name, room)
-	}
-
-	mux.HandleFunc("GET /api/version", versionHandler)
-	mux.HandleFunc("GET /api/hello", helloHandler)
-
-	mux.HandleFunc("GET /api/notify/{id}", notifyPublishHandler)
-	mux.HandleFunc("POST /api/notify/{id}", notifyUpdateHandler)
-	mux.HandleFunc("PUT /api/notify/{id}", notifySetHandler)
-	mux.HandleFunc("DELETE /api/notify/{id}", notifyRemoveHandler)
-	mux.HandleFunc("/api/notify/", methodNotAllowedHandler) // handle trailing slash
-}
-
-func versionHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.1.0"})
-}
-
-func helloHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"message": "hello"})
-}
-
-func notifyPublishHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) NotifyPublishHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 
 	id := r.PathValue("id")
@@ -249,8 +215,8 @@ func notifyPublishHandler(w http.ResponseWriter, r *http.Request) {
 		w:  w,
 		rc: http.NewResponseController(w),
 	}
-	clientsByID.Store(id, client)
-	defer clientsByID.Delete(id)
+	s.clientsByID.Store(id, client)
+	defer s.clientsByID.Delete(id)
 
 	// err := subscribe(id, requestedTopics)
 	// if err != nil {
@@ -263,7 +229,7 @@ func notifyPublishHandler(w http.ResponseWriter, r *http.Request) {
 	<-r.Context().Done()
 }
 
-func notifyUpdateHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) NotifyUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	id := r.PathValue("id")
@@ -279,13 +245,13 @@ func notifyUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := subscribe(id, options.Topics); err != nil {
+	if err := s.subscribe(id, options.Topics); err != nil {
 		EndWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	var topics []string
-	roomsByName.Range(func(k any, v any) bool {
+	s.roomsByName.Range(func(k any, v any) bool {
 		name := k.(string)
 		room := v.(*ChatRoom)
 
@@ -299,7 +265,7 @@ func notifyUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	EndWithResult(w, http.StatusOK, fmt.Sprintf("debug: subscriptions: '%s'", topicList))
 }
 
-func notifySetHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) NotifySetHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	id := r.PathValue("id")
@@ -316,7 +282,7 @@ func notifySetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var oldTopics []string
-	roomsByName.Range(func(k any, v any) bool {
+	s.roomsByName.Range(func(k any, v any) bool {
 		name := k.(string)
 		room := v.(*ChatRoom)
 
@@ -326,7 +292,7 @@ func notifySetHandler(w http.ResponseWriter, r *http.Request) {
 		return true
 	})
 
-	if err := subscribe(id, options.Topics); err != nil {
+	if err := s.subscribe(id, options.Topics); err != nil {
 		EndWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -335,7 +301,7 @@ func notifySetHandler(w http.ResponseWriter, r *http.Request) {
 	EndWithResult(w, http.StatusOK, fmt.Sprintf("debug: replaced subscriptions: '%s'", topicList))
 }
 
-func notifyRemoveHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) NotifyRemoveHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 
 	id := r.PathValue("id")
@@ -352,7 +318,7 @@ func notifyRemoveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var oldTopics []string
-	roomsByName.Range(func(k any, v any) bool {
+	s.roomsByName.Range(func(k any, v any) bool {
 		name := k.(string)
 		room := v.(*ChatRoom)
 
@@ -366,42 +332,38 @@ func notifyRemoveHandler(w http.ResponseWriter, r *http.Request) {
 	EndWithResult(w, http.StatusOK, fmt.Sprintf("debug: removed subscriptions: '%s'", topicList))
 }
 
-func methodNotAllowedHandler(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-}
-
-func subscribe(id string, topics []string) error {
-	nonTopics := getUniqueToRight(KnownTopics, topics)
+func (s *Server) subscribe(id string, topics []string) error {
+	nonTopics := getUniqueToRight(s.Config.Topics, topics)
 	if len(nonTopics) > 0 {
 		err := fmt.Errorf(
 			"unknown events: '%s', valid events are '%s'",
 			strings.Join(nonTopics, ", "),
-			strings.Join(KnownTopics, ", "),
+			strings.Join(s.Config.Topics, ", "),
 		)
 		return err
 	}
 
-	client := getClient(id)
+	client := s.getClient(id)
 	if client == nil {
 		err := fmt.Errorf("'%s' is not a current client", id)
 		return err
 	}
 
 	for _, topic := range topics {
-		room := getRoom(topic)
+		room := s.getRoom(topic)
 		room.ClientsById.Store(id, client)
 	}
 
 	return nil
 }
 
-func parseDelimitedString(fieldList string /*, delimiter string*/) []string {
-	f := func(c rune) bool {
-		return ',' == c || !unicode.IsSpace(c)
-	}
-	fields := strings.FieldsFunc(fieldList, f)
-	return fields
-}
+// func parseDelimitedString(fieldList string /*, delimiter string*/) []string {
+// 	f := func(c rune) bool {
+// 		return ',' == c || !unicode.IsSpace(c)
+// 	}
+// 	fields := strings.FieldsFunc(fieldList, f)
+// 	return fields
+// }
 
 func getUniqueToRight(leftHaystack, rightNeedles []string) []string {
 	sharedSet := make(map[string]struct{})
