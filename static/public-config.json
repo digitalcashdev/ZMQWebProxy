@@ -1,0 +1,24 @@
+{
+  "topics": [
+    "// https://docs.dash.org/en/stable/docs/core/api/zmq.html",
+    "hashblock",
+    "hashchainlock",
+    "hashtx",
+    "hashtxlock",
+    "hashgovernancevote",
+    "hashgovernanceobject",
+    "hashinstantsenddoublespend",
+    "hashrecoveredsig",
+    "rawblock",
+    "rawchainlock",
+    "rawchainlocksig",
+    "rawtx",
+    "rawtxlock",
+    "rawtxlocksig",
+    "rawgovernancevote",
+    "rawgovernanceobject",
+    "rawinstantsenddoublespend",
+    "rawrecoveredsig",
+    "sequence"
+  ]
+}
