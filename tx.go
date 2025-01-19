@@ -1,45 +1,38 @@
 package zmqwebproxy
 
 import (
-	"encoding/hex"
-	"encoding/json"
+	"bytes"
 	"math"
 
 	"github.com/dashpay/dashd-go/chaincfg/chainhash"
 	"github.com/dashpay/dashd-go/wire"
 )
 
-// HexString is a custom type that marshals and unmarshals to/from hex strings.
-type HexString []byte
-
-// MarshalJSON converts the HexString to a hexadecimal string.
-func (h HexString) MarshalJSON() ([]byte, error) {
-	hexStr := hex.EncodeToString(h)
-	return json.Marshal(hexStr)
-}
-
-// UnmarshalJSON parses a hexadecimal string into the HexString.
-func (h *HexString) UnmarshalJSON(data []byte) error {
-	var hexStr string
-	if err := json.Unmarshal(data, &hexStr); err != nil {
-		return err
-	}
-	decoded, err := hex.DecodeString(hexStr)
+func ParseTx(rawTx []byte) (*Tx, error) {
+	msgTx := &wire.MsgTx{}
+	r := bytes.NewReader(rawTx)
+	err := msgTx.Deserialize(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	*h = decoded
-	return nil
+
+	tx, err := WireMsgTxToTx(msgTx)
+	if err != nil {
+		return nil, err
+	}
+
+	return tx, nil
 }
 
 // Tx maps to the JSON transaction format.
 type Tx struct {
-	Version   int    `json:"version"`
-	TxVersion int    `json:"dashVersion"`
-	TxType    int    `json:"dashType"`
-	Vin       []Vin  `json:"vin"`
-	Vout      []Vout `json:"vout"`
-	Locktime  uint32 `json:"locktime"`
+	Raw       Base64RFCString `json:"raw,omitempty"`
+	Version   int             `json:"version"`
+	TxVersion int             `json:"dashVersion"`
+	TxType    int             `json:"dashType"`
+	Vin       []Vin           `json:"vin"`
+	Vout      []Vout          `json:"vout"`
+	Locktime  uint32          `json:"locktime"`
 }
 
 // Vin represents an input transaction.
@@ -63,8 +56,8 @@ type Script struct {
 	Hex HexString `json:"hex"`
 }
 
-// MsgTxToTx converts a wire.MsgTx to our custom Tx struct.
-func MsgTxToTx(msgTx *wire.MsgTx) (*Tx, error) {
+// WireMsgTxToTx converts a wire.MsgTx to our custom Tx struct.
+func WireMsgTxToTx(msgTx *wire.MsgTx) (*Tx, error) {
 	tx := &Tx{
 		Version:   int(msgTx.Version),
 		TxVersion: int(msgTx.Version) & 0xFFFF,

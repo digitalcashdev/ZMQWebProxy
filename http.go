@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -20,6 +24,13 @@ type Server struct {
 	msgChan     chan *ChatMessage
 }
 
+// EventSourceMessage goes to the client via channel
+type EventSourceMessage struct {
+	ID    string   `json:"id"`
+	Event string   `json:"event"`
+	Data  []string `json:"data"`
+}
+
 // Config is configuration
 type Config struct {
 	Topics []string `json:"topics"`
@@ -27,14 +38,104 @@ type Config struct {
 
 // ChatRoom holds a map of clients subscribed to it.
 type ChatRoom struct {
+	count          atomic.Int64
 	ClientsById    sync.Map // Key: RemoteAddr (string), Value: *Client
 	RecentMessages []ChatMessage
 }
 
 // ChatClient represents a connected client, and some metadata.
 type ChatClient struct {
-	w  http.ResponseWriter
-	rc *http.ResponseController
+	id       string
+	r        *http.Request
+	w        http.ResponseWriter
+	rc       *http.ResponseController
+	messages chan EventSourceMessage
+}
+
+func (s *Server) NewEventSourceClient(id string, w http.ResponseWriter, r *http.Request) *ChatClient {
+	// A block can contain ~10,000 transactions (2-megabyte / 200-byte),
+	// which only happens about every two minutes.
+	// TODO We'll need to debounce the Flush.
+	bufferSize := 1000
+	client := &ChatClient{
+		id:       id,
+		r:        r,
+		w:        w,
+		rc:       http.NewResponseController(w),
+		messages: make(chan EventSourceMessage, bufferSize),
+	}
+	s.clientsByID.Store(client.id, client)
+	return client
+}
+
+// Send puts the message in a channel to the client
+func (c *ChatClient) Send(msg EventSourceMessage) error {
+	select {
+	case c.messages <- msg:
+		return nil
+	default:
+		return fmt.Errorf("client is writing too slow")
+	}
+}
+
+func (c *ChatClient) WriteEventSourceHeaders() {
+	c.w.Header().Set("Content-Type", "text/event-stream")
+	c.w.Header().Set("Cache-Control", "no-cache")
+	c.w.WriteHeader(http.StatusOK)
+	c.rc.Flush()
+}
+
+// RelayEventsUntilClose reads from the messages channel until the client is done
+func (c *ChatClient) RelayEventsUntilClose() {
+	for {
+		select {
+		case <-c.r.Context().Done():
+			return
+		case msg := <-c.messages:
+			c.EventSourceSend(msg)
+		}
+	}
+}
+
+func (c *ChatClient) EventSourceSend(msg EventSourceMessage) {
+	if len(msg.ID) > 0 {
+		_, _ = fmt.Fprintf(c.w, "id: %s\n", msg.ID)
+	}
+
+	if len(msg.Event) > 0 {
+		_, _ = fmt.Fprintf(c.w, "event: %s\n", msg.Event)
+	}
+
+	if len(msg.Data) == 0 {
+		_, _ = fmt.Fprintf(c.w, "data: \n")
+	} else {
+		for _, data := range msg.Data {
+			_, _ = fmt.Fprintf(c.w, "data: %s\n", data)
+		}
+	}
+
+	_, _ = fmt.Fprintf(c.w, "\n")
+	c.Flush()
+}
+
+// Wraps http.ResponseController's Flush to avoid after-handler panics
+// "A ResponseController may not be used after the [Handler.ServeHTTP]
+// method has returned."
+// See https://github.com/golang/go/issues/19959#issuecomment-293933806
+func (c *ChatClient) Flush() {
+	c.rc.Flush()
+}
+
+// CloseClient cleans up the client, including closing the channel
+func (s *Server) CloseClient(c *ChatClient) error {
+	s.roomsByName.Range(func(k any, v any) bool {
+		room := v.(*ChatRoom)
+		room.ClientsById.Delete(c.id)
+		return true
+	})
+	s.clientsByID.Delete(c.id)
+	close(c.messages)
+	return nil
 }
 
 // ChatClient represents a message
@@ -58,7 +159,7 @@ type ErrorResponse struct {
 }
 
 type ResultResponse struct {
-	Result string `json:"error"`
+	Result string `json:"result"`
 }
 
 func EndWithError(w http.ResponseWriter, status int, message string) {
@@ -93,87 +194,74 @@ func New(config Config) *Server {
 	return s
 }
 
-func (s *Server) Send(c *ChatClient, id string, event string, messages []string) {
-	if len(id) > 0 {
-		_, _ = fmt.Fprintf(c.w, "id: %s\n", id)
-	}
-
-	if len(event) > 0 {
-		_, _ = fmt.Fprintf(c.w, "event: %s\n", id)
-	}
-
-	for _, message := range messages {
-		if _, err := fmt.Fprintf(c.w, "data: %s\n", message); err != nil {
-			s.clientsByID.Delete(id) // don't try again
-			return
-		}
-	}
-
-	fmt.Fprintf(c.w, "\n")
-	c.rc.Flush()
-}
-
 func (s *Server) SendToAll(event string, raw []byte) {
+	msgStr := hex.EncodeToString(raw)
+	// msgStr := base64.StdEncoding.EncodeToString(raw)
+
 	room := s.getRoom(event)
 	if room == nil {
-		return // TODO log sanity fail error
+		fmt.Fprintf(os.Stderr, "[sanity fail] zmq: no room %q\n", event)
+		return
 	}
 
-	msgs := []string{}
+	var hasAny bool
+	room.ClientsById.Range(func(k any, v any) bool {
+		hasAny = true
+		return false
+	})
+	if !hasAny {
+		fmt.Fprintf(os.Stderr, "[skip] zmq %q: no subscribers to topic\n", event)
+		return
+	}
+
+	var result string
 	switch event {
-	case "rpcblock":
-		// TODO
-	case "rawtx":
-		var hasAny bool
-		room2 := s.getRoom(event)
-		room2.ClientsById.Range(func(k any, v any) bool {
-			hasAny = true
-			return false
-		})
-		if hasAny {
-			// TODO does the client want all messages?
-			if tx, err := parseTx(raw); err != nil {
-				// ignore junk data, nothing we can do anyway
-			} else {
-				// txJSON, _ = json.MarshalIndent(tx, "", "  ")
-				txJSON, _ := json.Marshal(tx)
-				defer s.sendToAllJSON("rpctx", txJSON)
-			}
+	case "rawblock":
+		if block, err := ParseBlock(raw); err != nil {
+			// ignore junk data, nothing we can do anyway
+			fmt.Fprintf(os.Stderr, "[error] zmq: couldn't parse block: %s\n%x\n", err, raw)
+		} else {
+			block.Raw = raw
+			jsonBytes, _ := json.Marshal(block)
+			result = string(jsonBytes)
 		}
-	case "rpcgovernancevote":
+	case "rawtx":
+		if tx, err := ParseTx(raw); err != nil {
+			// ignore junk data, nothing we can do anyway
+			fmt.Fprintf(os.Stderr, "[error] zmq: couldn't parse tx: %s\n%x\n", err, raw)
+		} else {
+			tx.Raw = raw
+			jsonBytes, _ := json.Marshal(tx)
+			result = string(jsonBytes)
+		}
+	case "rawgovernancevote":
 		// TODO
-	case "rpcgovernanceobject":
+	case "rawgovernanceobject":
 		// TODO
 	default:
 		// ignore
 	}
 
-	msgHex := hex.EncodeToString(raw)
-	msgs = append(msgs, msgHex)
-
-	room.ClientsById.Range(func(k any, v any) bool {
-		// clientID := k.(string)
-		client := v.(*ChatClient)
-		msgID := ""
-		s.Send(client, msgID, event, msgs)
-		return true
-	})
-}
-
-func (s *Server) sendToAllJSON(event string, msg []byte) {
-	room := s.getRoom(event)
-	if room == nil {
-		return // TODO log error
-	}
-
 	msgs := []string{}
-	msgs = append(msgs, string(msg))
+	if len(result) == 0 {
+		result = fmt.Sprintf(`{"raw":"%s"}`, msgStr)
+	}
+	msgs = append(msgs, result)
 
+	count := room.count.Add(1)
+	lastEventID := strconv.FormatInt(count, 10)
 	room.ClientsById.Range(func(k any, v any) bool {
 		// clientID := k.(string)
 		client := v.(*ChatClient)
-		msgID := ""
-		s.Send(client, msgID, event, msgs)
+		if client == nil {
+			fmt.Fprintf(os.Stderr, "SANITY FAIL: client disappeared\n")
+			return true
+		}
+		_ = client.Send(EventSourceMessage{
+			ID:    lastEventID,
+			Event: event,
+			Data:  msgs,
+		})
 		return true
 	})
 }
@@ -194,39 +282,49 @@ func (s *Server) getRoom(name string) *ChatRoom {
 	return nil
 }
 
+func (s *Server) TopicsListHandler(w http.ResponseWriter, r *http.Request) {
+	var topics []string
+	for _, topic := range s.Config.Topics {
+		if len(topic) == 0 ||
+			strings.HasPrefix(topic, "#") ||
+			strings.HasPrefix(topic, "//") ||
+			strings.HasPrefix(topic, "/*") {
+			continue
+		}
+		topics = append(topics, topic)
+	}
+	EndWithResult(w, http.StatusOK, strings.Join(topics, ", "))
+}
+
 func (s *Server) NotifyPublishHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 
 	id := r.PathValue("id")
-	_, err := uuid.Parse(id)
-	if err != nil {
-		EndWithError(w, http.StatusBadRequest, "'id' must be a valid UUIDv4")
+	if len(id) == 0 {
+		uuidv7, _ := uuid.NewV7()
+		id = uuidv7.String()
+	} else {
+		_, err := uuid.Parse(id)
+		if err != nil {
+			EndWithError(w, http.StatusBadRequest, "'id' must be a valid UUIDv4")
+			return
+		}
+	}
+
+	client := s.NewEventSourceClient(id, w, r)
+
+	requestedTopics := parseDelimitedString(r.URL.Query().Get("dbg_topics")) // dbg for curl only due to errors
+	fmt.Fprintf(os.Stderr, "[DEBUG] requestedTopics %s %s\n", id, requestedTopics)
+	if err := s.subscribe(id, requestedTopics); err != nil {
+		EndWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// requestedTopics, err := parseDelimitedString(r.Query.Get("topics"))
-	// if err != nil {
-	// 	// TODO maybe only allow this via POST so that the user gets the JSON
-	// 	EndWithError(w, http.StatusBadRequest, "'topics' must be a comma- or space-delimited list of")
-	// 	return
-	// }
+	client.WriteEventSourceHeaders()
+	client.RelayEventsUntilClose()
 
-	client := &ChatClient{
-		w:  w,
-		rc: http.NewResponseController(w),
-	}
-	s.clientsByID.Store(id, client)
-	defer s.clientsByID.Delete(id)
-
-	// err := subscribe(id, requestedTopics)
-	// if err != nil {
-	// 	EndWithError(w, http.StatusBadRequest, err.Error())
-	// 	return
-	// }
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	<-r.Context().Done()
+	fmt.Fprintf(os.Stderr, "[DEBUG] closing client %s\n", id)
+	_ = s.CloseClient(client)
 }
 
 func (s *Server) NotifyUpdateHandler(w http.ResponseWriter, r *http.Request) {
@@ -345,25 +443,26 @@ func (s *Server) subscribe(id string, topics []string) error {
 
 	client := s.getClient(id)
 	if client == nil {
+		// TODO create client info before client connects (and cleanup on timeout)
 		err := fmt.Errorf("'%s' is not a current client", id)
 		return err
 	}
 
 	for _, topic := range topics {
 		room := s.getRoom(topic)
-		room.ClientsById.Store(id, client)
+		room.ClientsById.Store(client.id, client)
 	}
 
 	return nil
 }
 
-// func parseDelimitedString(fieldList string /*, delimiter string*/) []string {
-// 	f := func(c rune) bool {
-// 		return ',' == c || !unicode.IsSpace(c)
-// 	}
-// 	fields := strings.FieldsFunc(fieldList, f)
-// 	return fields
-// }
+func parseDelimitedString(fieldList string /*, delimiter string*/) []string {
+	f := func(c rune) bool {
+		return ',' == c || unicode.IsSpace(c)
+	}
+	fields := strings.FieldsFunc(fieldList, f)
+	return fields
+}
 
 func getUniqueToRight(leftHaystack, rightNeedles []string) []string {
 	sharedSet := make(map[string]struct{})

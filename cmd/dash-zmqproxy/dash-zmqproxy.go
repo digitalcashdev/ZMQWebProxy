@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/DigitalCashDev/zmqwebproxy"
 	"github.com/DigitalCashDev/zmqwebproxy/internal"
@@ -22,7 +25,7 @@ import (
 )
 
 var (
-	name = "goboilerplate"
+	name = "zmqwebproxy"
 	// these will be replaced by goreleaser
 	version = "0.0.0-dev"
 	date    = "0001-01-01T00:00:00Z"
@@ -57,11 +60,14 @@ func main() {
 	{
 		envPath = peekOption(os.Args, []string{"--env", "-env"})
 		if len(envPath) > 0 {
-			fmt.Fprintf(os.Stderr, "reading ENVs from %s", envPath)
+			fmt.Fprintf(os.Stderr, "maybe reading ENVs from %s... ", envPath)
 			if err := godotenv.Load(envPath); err != nil {
-				fmt.Fprintf(os.Stderr, ": skipped (%s)", err.Error())
+				fmt.Fprintf(os.Stderr, "skipped (%s)\n", err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "ok\n")
 			}
-			fmt.Fprintf(os.Stderr, "\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "[skip] not reading ENVs from file because --env not set")
 		}
 	}
 
@@ -102,7 +108,10 @@ func main() {
 	}
 	overlayFS.LocalFS = http.Dir(overlayFS.WebRoot)
 	overlayFS.EmbedFS = http.FS(static.FS)
-	if !overlayFS.WebRootOnly {
+	fmt.Fprintf(os.Stderr, "Serving overlay files from %s\n", overlayFS.WebRoot)
+	if overlayFS.WebRootOnly {
+		fmt.Fprintf(os.Stderr, "[skip] not loading embedded file system due to --web-root-only\n")
+	} else {
 		showEmbeddedFiles()
 	}
 
@@ -141,9 +150,14 @@ func main() {
 		}
 
 		s := zmqwebproxy.NewChatServer(context.TODO(), dashZMQHost, srv.Config)
-		s.ConnectWithReconnect()
+		go s.ConnectWithReconnect()
+
 		for {
-			msg := s.Recv()
+			msg, err := s.Recv()
+			if err != nil {
+				// EOF
+				break
+			}
 			srv.SendToAll(msg.Event, msg.Raw)
 		}
 	}()
@@ -156,19 +170,39 @@ func main() {
 	mux.Handle("GET /", fileServer)
 
 	mux.HandleFunc("GET /api/version", zmqwebproxy.CORSMiddleware(versionHandler))
-	mux.HandleFunc("GET /api/hello", helloHandler)
 
-	mux.HandleFunc("GET /api/notify/{id}", srv.NotifyPublishHandler)
-	mux.HandleFunc("POST /api/notify/{id}", srv.NotifyUpdateHandler)
-	mux.HandleFunc("PUT /api/notify/{id}", srv.NotifySetHandler)
-	mux.HandleFunc("DELETE /api/notify/{id}", srv.NotifyRemoveHandler)
+	mux.HandleFunc("GET /api/zmq/topics", srv.TopicsListHandler)
+	mux.HandleFunc("GET /api/zmq/eventsource", srv.NotifyPublishHandler)
+	mux.HandleFunc("GET /api/zmq/eventsource/{id}", srv.NotifyPublishHandler)
+	mux.HandleFunc("POST /api/zmq/eventsource/{id}", srv.NotifyUpdateHandler)
+	mux.HandleFunc("PUT /api/zmq/eventsource/{id}", srv.NotifySetHandler)
+	mux.HandleFunc("DELETE /api/zmq/eventsource/{id}", srv.NotifyRemoveHandler)
 	// mux.HandleFunc("/api/notify/", methodNotAllowedHandler) // handle trailing slash
 
-	log.Printf("Server is running on http://localhost%d", httpPort)
+	go func() {
+		var count int64
+		ticker := time.NewTicker(5000 * time.Millisecond)
+		for range ticker.C {
+			count += 1
+			srv.SendToAll("debug:ticker", int64ToBigEndianBytes(count))
+		}
+	}()
+
+	log.Printf("Server is listening on 0.0.0.0:%d", httpPort)
 	bindAddr := fmt.Sprintf(":%d", httpPort)
 	if err := http.ListenAndServe(bindAddr, mux); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func int64ToBigEndianBytes(value int64) []byte {
+	buffer := bytes.Buffer{}
+	err := binary.Write(&buffer, binary.BigEndian, value)
+	if err != nil {
+		fmt.Println("Error converting to big-endian byte slice:", err)
+		return nil
+	}
+	return buffer.Bytes()
 }
 
 func showEmbeddedFiles() {
@@ -218,23 +252,6 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 		Version string `json:"version"`
 	}{
 		Version: version,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(result)
-}
-
-func helloHandler(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if len(name) == 0 {
-		name = "World"
-	}
-	result := struct {
-		Message string `json:"message"`
-	}{
-		Message: fmt.Sprintf("Hello, %s!", name),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

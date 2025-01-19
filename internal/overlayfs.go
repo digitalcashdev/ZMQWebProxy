@@ -30,8 +30,8 @@ func (mfs *OverlayFS) ForceLocalOrEmbedOpen(name string) (http.File, error) {
 func (mfs *OverlayFS) Open(name string) (http.File, error) {
 	if len(mfs.WebRoot) > 0 {
 		localPath := filepath.Join(mfs.WebRoot, name)
-		info, err := os.Stat(localPath)
-		if err == nil && !info.IsDir() {
+		_, err := os.Stat(localPath)
+		if err == nil {
 			return mfs.LocalFS.Open(name)
 		}
 	}
