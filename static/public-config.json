@@ -19,6 +19,7 @@
     "rawgovernanceobject",
     "rawinstantsenddoublespend",
     "rawrecoveredsig",
-    "sequence"
+    "sequence",
+    "debug:ticker"
   ]
 }

@@ -1,15 +1,29 @@
 let App = {};
 
+const DEBUG_TICKER = "debug:ticker";
+
 let network = "testnet";
 // ex: 'https://digitalcash.dev' or '.'
 let baseUrl = ".";
+let eventSourceId = crypto.randomUUID();
+let eventSource;
+let isUnloading = false;
 
 // replaced by public-config.json
-let allowedEndpoints = [
-  "/api/goboilerplate/config",
-  "/api/goboilerplate/config/foo",
-  "/api/goboilerplate/config/bar",
+let allowedTopics = [
+  "rawtx",
+  "rawblock",
+  "rawgovernancevote",
+  "rawgovernanceobject",
 ];
+let defaultTopics = [
+  "rawtx",
+  "rawblock",
+  "rawgovernancevote",
+];
+
+let messages = [];
+let listenerAdded = {};
 
 // ajquery - still great after all these years!
 function $(sel, el) {
@@ -20,7 +34,7 @@ function $$(sel, el) {
   return Array.from((el || document).querySelectorAll(sel));
 }
 
-async function request(endpoint, payload) {
+async function request(topic, payload) {
   let method = "GET";
   let headers = {};
   if (payload) {
@@ -29,7 +43,7 @@ async function request(endpoint, payload) {
       "Content-Type": "application/json",
     });
   }
-  let resp = await fetch(`${baseUrl}${endpoint}`, {
+  let resp = await fetch(`${baseUrl}${topic}`, {
     method: method,
     headers: headers,
     body: payload,
@@ -49,23 +63,135 @@ async function request(endpoint, payload) {
 function parseHashQuery(locationHash) {
   let fragment = locationHash.slice(2); // drop leading '#?'
   if (!fragment) {
-    return null;
+    return { topics: [] };
   }
 
   let queryIter = new URLSearchParams(fragment);
   let query = Object.fromEntries(queryIter);
-  let endpoint = query.endpoint;
-  let bodyJson = queryIter.get("body");
-  let body;
-  if (bodyJson) {
-    body = JSON.parse(bodyJson);
+
+  let topics;
+  let topicList = query.topics || "";
+  topicList = topicList.trim();
+  if (topicList) {
+    topics = topicList.split(/[,\s]/);
+  } else {
+    topics = [];
   }
 
   return {
-    endpoint: endpoint,
-    body: body,
-    submit: "submit" in query,
+    topics: topics,
   };
+}
+
+/**
+ * @param {Event}
+ */
+App.$setSubscriptions = async function ($ev) {
+  console.info(`Topic Change: Set Subscriptions`);
+  let topic = $ev.target.value.trim();
+  if (!topic) {
+    return false;
+  }
+
+  let isKnown = allowedTopics.includes(topic);
+  if (!isKnown) {
+    return false;
+    // throw new Error(`topic '${topic}' is not known or not allowed`);
+  }
+
+  let visibilityByTopic = App._$getTopicsMap();
+  let exists = topic in visibilityByTopic;
+  visibilityByTopic[topic] = true;
+  App.$renderTags(visibilityByTopic);
+  $ev.target.value = '';
+
+  if (exists) {
+    return
+  }
+
+  await App.$updatePreview();
+  await App.submitForm();
+};
+
+/**
+ * @param {Event}
+ */
+App.$unsetTopic = async function ($ev) {
+  let oldTopic = $ev.target.closest('.tag').querySelector('input').value;
+  console.log(`DEBUG DELETE`, oldTopic, $ev.target);
+
+  let visibilityByTopic = App._$getTopicsMap();
+  visibilityByTopic[oldTopic] = null;
+  delete visibilityByTopic[oldTopic];
+  App.$renderTags(visibilityByTopic);
+
+  await App.$updatePreview();
+  await App.submitForm();
+};
+
+
+App.$renderTags = function (tagsMap) {
+	let $container = $(`[data-id="tagContainer"]`);
+	$container.innerHTML = '';
+
+	let $template = $('[data-id="tmplTopicTag"').content;
+    let $tagsFragment = new DocumentFragment();
+    let tags = Object.keys(tagsMap);
+    tags.sort();
+	for (let tag of tags) {
+        let checked = tagsMap[tag];
+		let $tagItem = $template.cloneNode(true);
+		let $checkbox = $tagItem.querySelector('input[type="checkbox"]');
+		let $label = $tagItem.querySelector('label span');
+
+		$checkbox.value = tag;
+		$checkbox.checked = checked;
+        $label.textContent = tag;
+
+		$tagsFragment.appendChild($tagItem);
+	}
+	$container.replaceChildren($tagsFragment);
+
+    let optionList = [];
+    for (let topic of allowedTopics) {
+      if (!tagsMap[topic]) {
+        optionList.push(`<option value="${topic}">${topic}</option>`);
+      }
+    }
+    let options = optionList.join("\n");
+
+    let $zmqwebproxyTopics = document.querySelector("#topics");
+    $zmqwebproxyTopics.innerText = "";
+    $zmqwebproxyTopics.insertAdjacentHTML("afterbegin", options);
+}
+
+App.$renderMessages = function (event) {
+  let visibilityByTopic = App._$getTopicsMap();
+  let $messages = $('[data-id="output"]')
+  $messages.textContent = '';
+  for (let message of messages) {
+    if (!visibilityByTopic[message.event]) {
+        if (message.event === "default") {
+            $('[data-id="output"]').insertAdjacentText('afterbegin', `(${message.event}) ${message.data}\n`);
+        }
+        continue;
+    }
+
+    $('[data-id="output"]').insertAdjacentText('afterbegin', `[${message.event}]\n${message.data}\n\n`);
+  }
+}
+
+App._$getTopicsMap = function () {
+  let topics = {};
+  let $topics = $$("input[name=topic]");
+  for (let $topic of $topics) {
+    let isKnown = allowedTopics.includes($topic.value);
+    if (isKnown) {
+      topics[$topic.value] = $topic.checked;
+    }
+  }
+
+  return topics;
 }
 
 App.$updatePreview = async function (event) {
@@ -76,30 +202,19 @@ App.$updatePreview = async function (event) {
     };
   }
 
-  let endpoint = $("input[name=goboilerplate-endpoint]").value || "";
-  let body = ""; // $("input[name=goboilerplate-payload]").value;
-  let opts = { pathname: endpoint, body: body };
-  let isKnown = allowedEndpoints.includes(endpoint);
+  let visibilityByTopic = App._$getTopicsMap();
+  let topics = Object.keys(visibilityByTopic);
+  topics.sort();
+  let topicList = topics.join(',');
+  topicList = topicList.replace(',debug:ticker,', ',');
+  topicList = topicList.replace(/,?debug:ticker,?/, '');
 
-  let shareHash = "";
-  let shareUrl = "";
-  let bodyJson; // $("input[name=goboilerplate-payload]").value || '{}';
-  if (isKnown) {
-    if (bodyJson) {
-      shareHash = `#?endpoint=${endpoint}&body=${bodyJson}&submit`;
-    } else {
-      shareHash = `#?endpoint=${endpoint}&submit`;
-    }
-  }
+  let shareHash = `#?topics=${topicList}`;
+  let shareUrl = `${location.protocol}//${location.host}/${shareHash}`;
+  $("[data-id=share]").href = shareUrl;
+  $("[data-id=share]").innerText = shareUrl;
 
-  if (isKnown || !endpoint) {
-    shareUrl = `${location.protocol}//${location.host}/${shareHash}`;
-    $("[data-id=share]").href = shareUrl;
-    $("[data-id=share]").innerText = shareUrl;
-  } else {
-    return;
-  }
-
+  let opts = { topics: topics };
   let previewType = document.querySelector("[name=http-request]:checked").value;
   let code = "";
   if (previewType === "curl") {
@@ -121,15 +236,17 @@ App.$updatePreview = async function (event) {
 App.$submitForm = async function (event) {
   event.preventDefault();
 
-  let endpoint = $("input[name=goboilerplate-endpoint]").value;
-  let isKnown = allowedEndpoints.includes(endpoint);
-  if (!isKnown) {
-    window.alert(`unknown endpoint '${endpoint}'`);
-    return;
-  }
+  await App.submitForm();
+};
 
-  let payload;
-  let result = await request(endpoint, payload).catch(function (err) {
+App.submitForm = async function () {
+  let visibilityByTopic = App._$getTopicsMap();
+  let topics = Object.keys(visibilityByTopic);
+  console.info(`Form Submit: Set Subscriptions:`, visibilityByTopic);
+
+  let result = await setSubscriptions(topics).catch(function (err) {
+    console.error(`Form Submit: Failed`);
+    console.error(err);
     let data = {
       code: err.code,
       message: err.message,
@@ -138,56 +255,105 @@ App.$submitForm = async function (event) {
   });
   let json = JSON.stringify(result, null, 2);
 
-  $("[data-id=output]").textContent = json;
+  for (let topic of topics) {
+    let fn = listenerAdded[topic];
+    if (fn) {
+      eventSource.removeEventListener(topic, fn);
+      eventSource.addEventListener(topic, fn);
+      continue;
+    }
+
+    listenerAdded[topic] = function ($ev) {
+        let data = $ev.data;
+        if (topic !== DEBUG_TICKER) {
+          try {
+              let json = JSON.parse(data);
+              data = JSON.stringify(json, null, 2);
+          } catch(e) {
+              // ignore non-json
+          }
+        }
+
+        let event = { id: $ev.lastEventId, event: topic, data: data};
+        messages.push(event);
+
+        let visibilityByTopic = App._$getTopicsMap();
+        if (visibilityByTopic[topic]) {
+          $('[data-id="output"]').insertAdjacentText('afterbegin', `[${event.event}]\n${event.data}\n\n`);
+        }
+    };
+    eventSource.addEventListener(topic, listenerAdded[topic]);
+  }
+
+  // TODO set status
+  // $("[data-id=output]").textContent += json;
 };
 
-function renderCurl(opts) {
-  let body = opts.body || "";
-  body = body.replace(/^/gm, "    ");
-  body = body.trim();
-  let dataBinary = "";
-  if (body) {
-    dataBinary = `\\\n    --data-binary '${body}'\n`;
+async function setSubscriptions(topics) {
+  let resp = await fetch(`/api/zmq/eventsource/${eventSourceId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      topics: topics
+    }),
+  });
+  if (!resp.ok) {
+    let msg = await resp.text();
+    throw new Error(msg);
   }
+
+  let data = await resp.json();
+  console.info(`Set subscriptions:`, data);
+}
+
+function renderCurl(opts) {
+  let topics = opts.topics.slice(0);
+  topics.sort();
+  let topicList = topics.join(',');
   let code = `
 
-curl --fail-with-body https://${window.location.host}${opts.pathname} \\
-    --user "$user:$pass" \\
-    -H "Content-Type: application/json" ${dataBinary}
-        `;
+curl --fail-with-body -N -G \\
+    "https://${window.location.host}/api/zmq/eventsource/$(uuidgen)" \\
+    --user "api:null" \\
+    -d 'dbg_topics=${topicList}'
+`;
   code = code.trim();
   return code;
 }
 
 function renderFetch(opts) {
-  let body = opts.body.trim();
-  body = body.replace(/^/gm, "    ");
-  body = body.trim();
+  let topics = opts.topics.slice(0);
+  topics.sort();
+  let topicList = topics.join('", "');
   let code = `
 
-let method = 'GET';
-let baseUrl = "https://${window.location.host}/${opts.pathname}";
-let basicAuth = btoa(\`user:pass\`);
-let body = JSON.stringify(${body});
-if (body) {
-    method = 'POST';
+// 1. Open EventSource
+let sseId = crypto.randomUUID();
+let baseUrl = \`https://${window.location.host}/api/zmq/eventsource/\${sseId}\`;
+let sse = new EventSource(baseUrl, { withCredentials: false });
+
+// 2. Listen on local Events
+let topics = ["${topicList}"];
+for (let topic of topics) {
+    sse.addEventListener(topic, function ($ev) {
+        console.info(\`[\${topic}] \${$ev.data}\`);
+    });
 }
+
+// Subscribe to remote Topics
+let basicAuth = btoa(\`api:null\`);
 let resp = await fetch(baseUrl, {
-    method: method,
+    method: 'PUT',
     headers: {
         "Authorization": \`Basic \${basicAuth}\`,
         "Content-Type": "application/json",
     },
-    body: body,
+    body: JSON.stringify({ topics: topics }),
 });
-
-let data = await resp.json();
-if (data.error) {
-    let err = new Error(data.error.message);
-    Object.assign(err, data.error);
-    throw err;
-}
-return data.result;
+let result = await resp.text();
+console.log(\`[DEBUG] status: \${result}\`);
 
         `;
   code = code.trim();
@@ -204,37 +370,77 @@ async function main() {
   let data = await resp.json();
 
   {
-    allowedEndpoints = [];
-    for (let endpoint of data.endpoints) {
+    allowedTopics = [];
+    for (let topic of data.topics) {
       // ... include, exclude, traverse here
-      allowedEndpoints.push(endpoint);
+      let isComment = /^([/][/]|[/][*]|#)/.test(topic)
+      if (isComment) {
+        continue
+      }
+      allowedTopics.push(topic);
     }
-
-    let optionList = [];
-    for (let opt of allowedEndpoints) {
-      optionList.push(`<option value="${opt}">${opt}</option>`);
-    }
-    let options = optionList.join("\n");
-
-    let $goboilerplateEndpoints = document.querySelector("#goboilerplate-endpoints");
-    $goboilerplateEndpoints.innerText = "";
-    $goboilerplateEndpoints.insertAdjacentHTML("afterbegin", options);
   }
 
   let opts = parseHashQuery(location.hash);
-  if (opts?.endpoint) {
-    $("input[name=goboilerplate-endpoint]").value = opts.endpoint;
-  }
-  if (opts?.body) {
-    $("[data-id=args]").value = JSON.stringify(opts.body);
+  {
+    if (!opts.topics.length) {
+      for (let topic of defaultTopics) {
+        let isKnown = allowedTopics.includes(topic);
+        if (!isKnown) {
+          continue;
+        }
+        opts.topics.push(topic);
+      }
+    }
+
+    let hasDebugTicker = opts.topics.includes(DEBUG_TICKER);
+    if (!hasDebugTicker) {
+      let isKnown = allowedTopics.includes(DEBUG_TICKER);
+      if (isKnown) {
+        opts.topics.push(DEBUG_TICKER)
+      }
+    }
   }
 
+  let visibilityByTopic = {};
+  {
+    for (let topic of opts.topics) {
+      visibilityByTopic[topic] = true;
+    }
+    App.$renderTags(visibilityByTopic);
+  }
+
+  console.log('DEBUG parse topics', opts.topics);
   document.body.removeAttribute("hidden");
+
+  // TODO debounce immediate failures
+  function initEventSource() {
+    eventSource = new EventSource(`/api/zmq/eventsource/${eventSourceId}`, { withAuthentication: false });
+    eventSource.onerror = function (_) {
+      if (isUnloading) {
+        return;
+      }
+      eventSource.close();
+      initEventSource();
+
+      throw new Error(`EventSource restarted unexpectedly (check the NETWORK console for error)`);
+    };
+    eventSource.onopen = async function ($ev) {
+      let topics = Object.keys(visibilityByTopic);
+      await App.submitForm();
+    };
+    eventSource.onmessage = function ($ev) {
+      let event = { id: $ev.lastEventId, event: "default", data: $ev.data};
+      messages.push(event);
+      $('[data-id="output"]').insertAdjacentText('afterbegin', `(${event.event}) ${event.data}\n\n`);
+    };
+  }
+  initEventSource();
 
   await App.$updatePreview();
 
-  if (opts?.submit && opts?.endpoint) {
-    let isKnown = allowedEndpoints.includes(opts.endpoint);
+  if (opts?.submit && opts?.topic) {
+    let isKnown = allowedTopics.includes(opts.topic);
     if (!isKnown) {
       return;
     }
@@ -243,7 +449,7 @@ async function main() {
       bubbles: true,
       cancelable: true,
     });
-    $("form#goboilerplate-form").dispatchEvent(event);
+    $("form#form").dispatchEvent(event);
   }
 }
 
@@ -278,6 +484,10 @@ function handleError(err) {
     `Error:\none of our developers let a bug slip through the cracks:\n\n${err.message}`,
   );
 }
+
+window.onbeforeunload = function (ev) {
+  isUnloading = true;
+};
 
 window.onerror = function (message, url, lineNumber, columnNumber, err) {
   if (!err) {
