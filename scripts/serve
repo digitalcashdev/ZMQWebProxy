@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+set -u
+
+mkdir -p ./public.tmp.d/
+
+fn_link() { (
+    if ! test -e ./public.tmp.d/index.html; then
+        ln -s ../static/"${1}" ./public.tmp.d/
+    fi
+); }
+
+fn_link "index.html"
+fn_link "app.js"
+fn_link "mvp.css"
+fn_link "public-config.json"
+
+g_version="$(git describe --tags --abbrev=7 --dirty=+local)"
+go run -ldflags="-X main.version=$g_version" -- \
+    ./cmd/dash-zmqproxy/ --port 3080 --env ~/.config/dash-zmqproxy/env --web-root ./static --web-root-only

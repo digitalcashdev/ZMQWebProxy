@@ -1,0 +1,7 @@
+zmqwebproxy.example.com {
+	encode gzip zstd
+
+	handle /* {
+        reverse_proxy localhost:3000
+    }
+}
